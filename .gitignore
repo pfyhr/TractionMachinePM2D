@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Elmer generated mesh (rebuilt by build_mesh())
+mesh/
+
+# Elmer results (large VTU / dat files)
+results/
+results_*/
+case_sweep/
+
+# Generated SIF files (produced by gen_sif / notebook)
+case_nb.sif
+case_sweep.sif
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

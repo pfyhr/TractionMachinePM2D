@@ -1,0 +1,363 @@
+! 2D Magnetodynamics — 48-slot 8-pole 3-phase inset-PM traction motor
+! Stator OD=220mm, active length=170mm, 45° sector with anti-periodic BCs.
+! Mesh is in mm → Coordinate Scaling = 0.001 converts to SI metres.
+
+$ WM = 2*pi*1500/60       ! Mechanical frequency [rad/s]
+$ PP = 4                   ! Pole pairs
+$ H_PM = 920000            ! Magnetization at 20 deg C [A/m]
+$ Is = 200.0               ! Peak ampere-turns per coil side [A] (placeholder)
+$ Carea = 6.85e-5          ! Coil side conductor area [m²] (placeholder)
+$ Mangle1 = 22.5           ! Magnet centre angle in 45° sector [deg]
+$ DegreesPerSec = WM*180.0/pi
+$ RotorInitPos = 0
+$ rpm = 1500
+$ fme = rpm/60             ! Mechanical frequency [Hz]
+$ fel = fme*PP             ! Electrical frequency = 100 Hz
+$ rot_dir = 1
+$ dir_ph0 = 1
+$ dir_ph1 = 1
+$ dir_ph2 = -1
+
+$ nper  = 120
+$ dt    = 1.0/(fme*nper)
+$ ncycle = 2
+
+$ suffix = "2d"
+
+echo off
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "mesh"
+  Include Path "."
+  Results Directory "results"
+End
+
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian 2D
+  Coordinate Scaling = 0.001    ! mesh is in mm → convert to SI metres
+  Simulation Type = Transient
+  Timestepping Method = BDF
+  BDF Order = 2
+  Timestep Sizes = $dt
+  Timestep Intervals = $nper*ncycle+1
+  Timestep Start Zero = Logical True
+  Time Period = $1/fme
+
+  Output Intervals = 1
+
+  Use Mesh Names = True
+
+  Rotor Radius = Real 0.073625   ! R_sb in metres
+End
+
+!--- MATERIALS ---
+Material 1
+  Name = "Air"
+  Relative Permeability = 1
+  Relative Permittivity = 1
+  Electric Conductivity = 0
+End
+
+Material 3
+  Name = "StatorMaterial"
+  Include "m350-50a_20c_extrapolated.pmf"
+  Harmonic Loss Coefficient 1 = Real 159.9615
+  Harmonic Loss Coefficient 2 = Real 0.934621628891
+End
+
+Material 4
+  Name = "RotorMaterial"
+  Include "m350-50a_20c_extrapolated.pmf"
+  Harmonic Loss Coefficient 1 = Real 159.9615
+  Harmonic Loss Coefficient 2 = Real 0.934621628891
+End
+
+Material 5
+  Name = "Copper"
+  Relative Permeability = 1
+  Relative Permittivity = 1
+  Electric Conductivity = 0
+End
+
+Material 6
+  Name = "PM_1"
+  Relative Permeability = 1.03
+  Relative Permittivity = 1
+
+  Magnetization 1 = Variable time
+    Real MATC "H_PM*cos(rot_dir*WM*tx(0) + (RotorInitPos + Mangle1)*pi/180)"
+  Magnetization 2 = Variable time
+    Real MATC "H_PM*sin(rot_dir*WM*tx(0) + (RotorInitPos + Mangle1)*pi/180)"
+
+  Electric Conductivity = 625000.0
+End
+
+!--- BODY FORCES ---
+Body Force 1
+  Name = "BodyForce_Rotation"
+End
+
+Body Force 2
+  Name = "Phase_0_BF_2"
+  Current Density = Variable time
+    Real MATC "dir_ph0*Is/Carea*sin(tx(0)*2*pi*fel - 0*2*pi/3)"
+End
+
+Body Force 3
+  Name = "Phase_1_BF_3"
+  Current Density = Variable time
+    Real MATC "dir_ph1*Is/Carea*sin(tx(0)*2*pi*fel - 1*2*pi/3)"
+End
+
+Body Force 4
+  Name = "Phase_2_BF_4"
+  Current Density = Variable time
+    Real MATC "dir_ph2*Is/Carea*sin(tx(0)*2*pi*fel - 2*2*pi/3)"
+End
+
+!--- BODIES ---
+Body 1
+  Name = Stator-0_Lamination
+  Equation = 2
+  Material = 3
+End
+
+Body 2
+  Name = Stator-0_Winding_R0-T0-S0
+  Equation = 1
+  Material = 5
+  Body Force = 2
+End
+
+Body 3
+  Name = Stator-0_Winding_R0-T0-S1
+  Equation = 1
+  Material = 5
+  Body Force = 2
+End
+
+Body 4
+  Name = Stator-0_Winding_R0-T0-S2
+  Equation = 1
+  Material = 5
+  Body Force = 4
+End
+
+Body 5
+  Name = Stator-0_Winding_R0-T0-S3
+  Equation = 1
+  Material = 5
+  Body Force = 4
+End
+
+Body 6
+  Name = Stator-0_Winding_R0-T0-S4
+  Equation = 1
+  Material = 5
+  Body Force = 3
+End
+
+Body 7
+  Name = Stator-0_Winding_R0-T0-S5
+  Equation = 1
+  Material = 5
+  Body Force = 3
+End
+
+Body 8
+  Name = Airgap_Stator
+  Equation = 1
+  Material = 1
+End
+
+Body 9
+  Name = Airgap_Rotor
+  Equation = 1
+  Material = 1
+  Body Force = 1
+End
+
+Body 10
+  Name = Rotor-0_Lamination
+  Equation = 2
+  Material = 4
+  Body Force = 1
+  Torque Groups = Integer 1
+End
+
+Body 11
+  Name = Rotor-0_HoleMag_R0-T0-S0
+  Equation = 1
+  Material = 6
+  Body Force = 1
+  Torque Groups = Integer 1
+End
+
+Body 12
+  Name = None_Shaft
+  Equation = 1
+  Material = 1
+  Body Force = 1
+  Torque Groups = Integer 1
+End
+
+Equation 1
+  Name = "Model_Domain"
+  Active Solvers(5) = 1 2 3 4 5
+End
+
+Equation 2
+  Name = "Laminations"
+  Active Solvers(6) = 1 2 3 4 5 6
+End
+
+!--- SOLVERS ---
+Solver 1
+  Exec Solver = Before Timestep
+  Equation = MeshDeform
+  Procedure = "RigidMeshMapper" "RigidMeshMapper"
+
+  Rotor Mode = Logical True
+  Rotor Bodies(4) = Integer 9 10 11 12
+  Mesh Rotate 3 = Variable time
+    Real MATC "RotorInitPos + rot_dir*tx(0)*DegreesPerSec"
+End
+
+Solver 2
+  Equation = MgDyn2D
+  Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+  Exec Solver = Always
+  Variable = A
+
+  Nonlinear System Convergence Tolerance = 1e-05
+  Nonlinear System Max Iterations = 100
+  Nonlinear System Newton After Iterations = 3
+  Nonlinear System Relaxation Factor = 0.9
+  Nonlinear System Convergence Without Constraints = True
+
+  Export Lagrange Multiplier = True
+  Linear System Abort Not Converged = False
+  Linear System Solver = Iterative
+  Linear System Iterative Method = idrs
+  Optimize Bandwidth = Logical True
+  Linear System Preconditioning = ILU2
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 20
+  Linear System Convergence Tolerance = 1e-08
+
+  Mortar BCs Additive = True
+  Apply Conforming BCs = True
+
+  Handle Assembly = Logical True
+End
+
+Solver 3
+  Exec Solver = Always
+  Equation = CalcFields
+  Potential Variable = "A"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Calculate Nodal Forces = True
+  Calculate Magnetic Vector Potential = False
+  Calculate Winding Voltage = Logical False
+  Calculate Current Density = True
+  Calculate Maxwell Stress = False
+  Calculate JxB = False
+  Calculate Magnetic Field Strength = True
+  Linear System Solver = Direct
+  Linear System Direct Method = umfpack
+
+  Calculate Nodal Fields = False
+  Calculate Elemental Fields = True
+End
+
+Solver 4
+  Exec Solver = After Timestep
+  Equation = "VtuOutput"
+  Procedure = "ResultOutputSolve" "ResultOutputSolver"
+  Output File Name = step-$suffix$
+  Vtu Format = True
+  Binary Output = True
+  Single Precision = True
+  Save Geometry Ids = True
+  Show Variables = True
+  Discontinuous Bodies = True
+End
+
+Solver 5
+  Exec Solver = After Timestep
+  Equation = SaveScalars
+  Filename = "scalars.dat"
+  Procedure = "SaveData" "SaveScalars"
+  Show Norm Index = 1
+End
+
+Solver 6
+  Exec Solver = Always
+  Equation = FourierLoss
+  Procedure = "FourierLoss" "FourierLossSolver"
+  Target Variable = A
+
+  Frequency = Real $ fel
+
+  Fourier Start Time = Real 0.0
+  Fourier Integrate Cycles = Integer 1
+  Separate Loss Components = Logical True
+
+  Fourier Series Components = 48
+  Fourier Loss Filename = File "results/loss-$suffix$.dat"
+
+  Harmonic Loss Frequency Exponent 1 = Real 1.0
+  Harmonic Loss Frequency Exponent 2 = Real 2.0
+
+  Harmonic Loss Field Exponent 1 = Real 2.0
+  Harmonic Loss Field Exponent 2 = Real 2.0
+
+  Calculate Elemental Fields = True
+End
+
+!--- BOUNDARY CONDITIONS ---
+Boundary Condition 1
+  Name = SB_Rotor
+  Mortar BC = 2
+  Anti Rotational Projector = True
+  Galerkin Projector = True
+End
+
+Boundary Condition 2
+  Name = SB_Stator
+End
+
+Boundary Condition 3
+  Name = Domain
+  A = Real 0
+End
+
+Boundary Condition 4
+  Name = Stator-Right
+  Conforming BC = 5
+  Mortar BC Static = True
+  Anti Radial Projector = True
+  Galerkin Projector = True
+End
+
+Boundary Condition 5
+  Name = Stator-Left
+End
+
+Boundary Condition 6
+  Name = Rotor-Right
+  Conforming BC = 7
+  Mortar BC Static = True
+  Anti Radial Projector = True
+  Galerkin Projector = True
+End
+
+Boundary Condition 7
+  Name = Rotor-Left
+End
