@@ -22,7 +22,7 @@ from typing import Optional
 import numpy as np
 
 from motor_params import MotorParams, DEFAULT_PARAMS
-from gen_sif import _PHASE_MAP   # for default body numbering
+from gen_sif import _PHASE_MAP, conductor_body_map   # for default body numbering
 
 π = math.pi
 
@@ -461,6 +461,174 @@ def plot_flux_density(
     ax.set_ylabel("y  [mm]")
     ax.set_title(title or f"{field_name} — {vtu_file.name}")
 
+    return fig, ax
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Back-EMF from VTU flux-linkage integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_bemf(
+    vtu_files: list,
+    params: MotorParams,
+    phase_map: Optional[list[str]] = None,
+    nper: int = 120,
+) -> dict:
+    """
+    Compute 3-phase back-EMF from a time-ordered sequence of Elmer VTU files.
+
+    For each timestep, integrates the magnetic vector potential A over each
+    phase's conductor cross-sections to get flux linkage Ψ(t), then
+    differentiates numerically to get back-EMF e = -dΨ/dt.
+
+    Physics
+    -------
+    In 2D (per unit depth), for one sector of the machine:
+        Ψ_ph = (SCALE / Carea) × (∫∫_{ph+} A dΩ  −  ∫∫_{ph−} A dΩ)
+    where
+        SCALE = Qp × L_active [m]     (sectors × axial length)
+        Carea                          (conductor area per slot [m²])
+        A                              (MVP z-component, Elmer SI output [Wb/m])
+        dΩ                             (element area [m²], coords already in m)
+
+    Parameters
+    ----------
+    vtu_files  : list of VTU file paths, time-ordered (step t0001, t0002, …)
+    params     : MotorParams used for the simulation (SCALE, Carea, rpm, PP)
+    phase_map  : phase assignment used in gen_sif; defaults to _PHASE_MAP
+    nper       : timesteps per mechanical period (default 120, matches gen_sif)
+
+    Returns dict with:
+        t_s       : time array [s]
+        theta_el  : electrical angle [deg]
+        psi_A/B/C : flux linkage per phase [Wb]
+        e_A/B/C   : back-EMF per phase [V]
+        e_peak    : peak back-EMF (max |e_A|) [V]
+        e_rms     : phase RMS back-EMF [V]
+    """
+    try:
+        import meshio
+    except ImportError as err:
+        raise ImportError("Install meshio:  pip install meshio") from err
+
+    p = params
+    body_ph = conductor_body_map(p, phase_map)  # {'A+': [5,6,...], 'C-': [...], ...}
+
+    # Build set of body ids per phase (sign already encoded in the key)
+    # pos_ids[ph_letter] = body ids where sign is positive
+    # neg_ids[ph_letter] = body ids where sign is negative
+    phases = {"A": {}, "B": {}, "C": {}}
+    for ph_str, ids in body_ph.items():
+        letter = ph_str[0]
+        sign   = ph_str[1]
+        phases[letter][sign] = ids   # phases['A']['+'] = [5,6,...] or ['-'] = [...]
+
+    fme = p.rpm / 60.0
+    dt  = 1.0 / (fme * nper)
+    SCALE  = p.SCALE
+    Carea  = p.Carea
+
+    psi = {ph: [] for ph in "ABC"}
+
+    for vtu_path in vtu_files:
+        m = meshio.read(str(vtu_path))
+
+        # Triangles + their geometry IDs
+        tris, gids = None, None
+        for ci, block in enumerate(m.cells):
+            if "triangle" in block.type:
+                tris = block.data                              # (T, 3)
+                gids = m.cell_data["GeometryIds"][ci]         # (T,)
+                break
+        if tris is None:
+            raise ValueError(f"No triangle cells in {vtu_path}")
+
+        pts = m.points[:, :2]                                 # (N, 2) in metres
+        a   = np.asarray(m.point_data["a"]).ravel()           # (N,) in Wb/m
+
+        # Triangle centroids: mean of 3 node A values
+        a_elem = a[tris].mean(axis=1)                         # (T,)
+
+        # Triangle areas (shoelace, coords in m → area in m²)
+        v0 = pts[tris[:, 1]] - pts[tris[:, 0]]
+        v1 = pts[tris[:, 2]] - pts[tris[:, 0]]
+        area_elem = 0.5 * np.abs(v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0])  # (T,)
+
+        # Integrate A per body group
+        for ph in "ABC":
+            plus_ids  = set(phases[ph].get("+", []))
+            minus_ids = set(phases[ph].get("-", []))
+
+            mask_p = np.isin(gids, list(plus_ids))  if plus_ids  else np.zeros(len(gids), bool)
+            mask_m = np.isin(gids, list(minus_ids)) if minus_ids else np.zeros(len(gids), bool)
+
+            integral = (a_elem[mask_p] * area_elem[mask_p]).sum() \
+                     - (a_elem[mask_m] * area_elem[mask_m]).sum()
+
+            psi[ph].append(SCALE / Carea * integral)
+
+    n = len(vtu_files)
+    t_s = np.arange(1, n + 1) * dt
+    theta_el = t_s * 360.0 * p.f_el   # electrical angle [deg]
+
+    result = {"t_s": t_s, "theta_el": theta_el}
+    for ph in "ABC":
+        psi_arr = np.array(psi[ph])
+        e_arr   = -np.gradient(psi_arr, t_s)
+        result[f"psi_{ph}"] = psi_arr
+        result[f"e_{ph}"]   = e_arr
+
+    # Peak and RMS from phase A (all phases identical by symmetry at steady state)
+    result["e_peak"] = float(np.max(np.abs(result["e_A"])))
+    result["e_rms"]  = float(np.sqrt(np.mean(result["e_A"] ** 2)))
+    return result
+
+
+def plot_bemf(
+    bemf: dict,
+    ax=None,
+    figsize: tuple = (9, 4),
+    title: str | None = None,
+) -> tuple:
+    """
+    Plot 3-phase back-EMF waveforms from compute_bemf() output.
+
+    Parameters
+    ----------
+    bemf    : dict returned by compute_bemf()
+    ax      : matplotlib Axes (created if None)
+    figsize : figure size if ax is None
+    title   : plot title (auto-generated if None)
+
+    Returns
+    -------
+    (fig, ax)
+    """
+    import matplotlib.pyplot as plt
+
+    theta = bemf["theta_el"] % 360.0   # wrap to 0–360°
+    order = np.argsort(theta)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.get_figure()
+
+    colors = {"A": "tab:blue", "B": "tab:orange", "C": "tab:green"}
+    for ph, col in colors.items():
+        ax.plot(theta[order], bemf[f"e_{ph}"][order],
+                color=col, lw=1.5, label=f"Phase {ph}")
+
+    e_pk  = bemf["e_peak"]
+    e_rms = bemf["e_rms"]
+    ax.set_xlabel("Electrical angle [deg]")
+    ax.set_ylabel("Back-EMF [V]")
+    ax.set_title(title or
+                 f"Open-circuit back-EMF  (peak {e_pk:.0f} V,  RMS {e_rms:.0f} V)")
+    ax.axhline(0, color="gray", lw=0.6)
+    ax.legend(loc="upper right")
+    ax.set_xlim(0, 360)
+    fig.tight_layout()
     return fig, ax
 
 

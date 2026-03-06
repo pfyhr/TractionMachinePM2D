@@ -18,6 +18,13 @@ from motor_params import MotorParams, DEFAULT_PARAMS
 π  = math.pi
 μ0 = 4e-7 * π   # permeability of free space [H/m]
 
+# ── Material constants (single source of truth used inside gen_sif()) ─────────
+M350_50A_PMF_FILE = "m350-50a_20c_extrapolated.pmf"   # B-H curve (extrapolated to 5 T)
+M350_50A_LOSS_C1  = 159.9615          # Harmonic Loss Coefficient 1 [W/(T²·Hz·m³)]
+M350_50A_LOSS_C2  = 0.934621628891    # Harmonic Loss Coefficient 2 [W/(T²·Hz²·m³)]
+N45SH_SIGMA       = 625_000.0         # electrical conductivity [S/m]  (ρ ≈ 1.6 µΩ·m)
+N45SH_DENSITY     = 7_500.0           # mass density [kg/m³]
+
 # Phase assignment for the default 48s/8p/3ph design (6 slots per sector).
 # Matches gen_mesh._PHASE_MAP exactly.
 _PHASE_MAP = ["A+", "A+", "C-", "C-", "B+", "B+"]
@@ -28,6 +35,89 @@ _PHASE_DECODE: dict[str, tuple[int, int]] = {
     "B+": (1, +1), "B-": (1, -1),
     "C+": (2, +1), "C-": (2, -1),
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def material_table(params: MotorParams) -> list[dict]:
+    """
+    Return a list of material property dicts exactly as they appear in the SIF.
+
+    Each dict has keys: id, name, and material-specific property keys.
+    Values are the same literals written into the SIF — no separate copy.
+    """
+    p = params
+    H_PM = p.B_r / (p.mu_r * μ0)
+    return [
+        {
+            "id": 1,
+            "name": "Air",
+            "mu_r": 1.0,
+            "epsilon_r": 1.0,
+            "sigma [S/m]": 0.0,
+        },
+        {
+            "id": 2,
+            "name": "Copper (hairpin)",
+            "mu_r": 1.0,
+            "epsilon_r": 1.0,
+            "sigma [S/m]": 0.0,
+            "note": "J applied as body force; resistive loss not modelled in 2D",
+        },
+        {
+            "id": 3,
+            "name": "M350-50A (stator laminations)",
+            "mu_r": "nonlinear — see PMF",
+            "BH curve": M350_50A_PMF_FILE,
+            "loss C1 [W/(T²·Hz·m³)]": M350_50A_LOSS_C1,
+            "loss C2 [W/(T²·Hz²·m³)]": M350_50A_LOSS_C2,
+        },
+        {
+            "id": 4,
+            "name": "M350-50A (rotor laminations)",
+            "mu_r": "nonlinear — see PMF",
+            "BH curve": M350_50A_PMF_FILE,
+            "loss C1 [W/(T²·Hz·m³)]": M350_50A_LOSS_C1,
+            "loss C2 [W/(T²·Hz²·m³)]": M350_50A_LOSS_C2,
+        },
+        {
+            "id": 5,
+            "name": "N45SH (NdFeB magnet)",
+            "mu_r": p.mu_r,
+            "B_r [T]": p.B_r,
+            "H_PM [A/m]": round(H_PM),
+            "sigma [S/m]": N45SH_SIGMA,
+            "density [kg/m³]": N45SH_DENSITY,
+            "note": "Hci ≈ 2000 kA/m (SH high-temp grade)",
+        },
+    ]
+
+
+def conductor_body_map(
+    params: MotorParams,
+    phase_map: Optional[list[str]] = None,
+) -> dict[str, list[int]]:
+    """
+    Return a dict mapping each phase string (e.g. 'A+', 'B+', 'C-') to the
+    list of Elmer body numbers that carry its current density.
+
+    Body numbering is identical to the one gen_sif() writes into the SIF, so
+    this can be used to correlate VTU GeometryIds with phases for post-processing.
+    """
+    p = params
+    if phase_map is None:
+        phase_map = _PHASE_MAP[:]
+    result: dict[str, list[int]] = {}
+    n = 1
+    n += 1  # Stator_Iron
+    n += 1  # Airgap_Stator
+    for i in range(p.ns):
+        ph = phase_map[i]
+        n += 1  # S{i}_Opening
+        n += 1  # S{i}_Insul
+        for _ in range(p.n_hp):
+            result.setdefault(ph, []).append(n)
+            n += 1
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,21 +325,21 @@ def gen_sif(
         "",
         "Material 3",
         '  Name = "StatorMaterial"',
-        '  Include "m350-50a_20c_extrapolated.pmf"',
-        "  Harmonic Loss Coefficient 1 = Real 159.9615",
-        "  Harmonic Loss Coefficient 2 = Real 0.934621628891",
+        f'  Include "{M350_50A_PMF_FILE}"',
+        f"  Harmonic Loss Coefficient 1 = Real {M350_50A_LOSS_C1}",
+        f"  Harmonic Loss Coefficient 2 = Real {M350_50A_LOSS_C2}",
         "End",
         "",
         "Material 4",
         '  Name = "RotorMaterial"',
-        '  Include "m350-50a_20c_extrapolated.pmf"',
-        "  Harmonic Loss Coefficient 1 = Real 159.9615",
-        "  Harmonic Loss Coefficient 2 = Real 0.934621628891",
+        f'  Include "{M350_50A_PMF_FILE}"',
+        f"  Harmonic Loss Coefficient 1 = Real {M350_50A_LOSS_C1}",
+        f"  Harmonic Loss Coefficient 2 = Real {M350_50A_LOSS_C2}",
         "End",
         "",
         "Material 5",
         '  Name = "N45SH"',
-        f"  ! NdFeB N45SH: Br={p.B_r:.3f} T, Hci≈2000 kA/m, mu_r={p.mu_r}, sigma=625 kS/m",
+        f"  ! NdFeB N45SH: Br={p.B_r:.3f} T, Hci≈2000 kA/m, mu_r={p.mu_r}, sigma={N45SH_SIGMA/1e3:.0f} kS/m",
         f"  Relative Permeability = {p.mu_r}",
         "  Relative Permittivity = 1",
         f"  ! H_PM = Br / (mu_r * mu0) = {H_PM:.0f} A/m",
@@ -259,8 +349,8 @@ def gen_sif(
         "  Magnetization 2 = Variable time",
         '    Real MATC "H_PM*sin(rot_dir*WM*tx(0) + (RotorInitPos + Mangle1)*pi/180)"',
         "",
-        "  Electric Conductivity = 625000.0  ! rho ≈ 1.6 µΩ·m",
-        "  Density = 7500.0                  ! kg/m³",
+        f"  Electric Conductivity = {N45SH_SIGMA:.1f}  ! rho ≈ 1.6 µΩ·m",
+        f"  Density = {N45SH_DENSITY:.1f}              ! kg/m³",
         "End",
         "",
     ]
