@@ -20,5 +20,8 @@ case_sweep.sif
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# Local research notes (not for publishing)
+research/
+
 # macOS
 .DS_Store
