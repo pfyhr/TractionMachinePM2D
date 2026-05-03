@@ -73,9 +73,24 @@ def _curve_length(occ, ctag: int) -> float:
     return occ.getMass(1, ctag)
 
 
+def _rot2d(x: float, y: float, angle: float) -> tuple[float, float]:
+    """Rotate point (x, y) CCW by angle [rad]."""
+    c, s = math.cos(angle), math.sin(angle)
+    return x * c - y * s, x * s + y * c
+
+
 def _classify_sector_bounds(
-    model, curve_set: set[int], excl: set[int]
+    model, curve_set: set[int], excl: set[int], theta_s: float
 ) -> tuple[list[int], list[int]]:
+    """Split curves into right (θ=0) and left (θ=θs) sector boundaries.
+
+    Uses the cross-product formula |x·sin(θs) − y·cos(θs)| < tol for the
+    left boundary, which generalises the hardcoded x≈y check (θs=45°) to
+    any pole count.  The dot-product guard distinguishes the left boundary
+    from the right one when θs=180° (Qp=2) where both lie on the x-axis.
+    """
+    sin_s = math.sin(theta_s)
+    cos_s = math.cos(theta_s)
     right, left = [], []
     for c in sorted(curve_set - excl):
         x1, y1, _, x2, y2, _ = model.getBoundingBox(1, c)
@@ -84,8 +99,11 @@ def _classify_sector_bounds(
             continue
         if abs(y1) < 0.5 and abs(y2) < 0.5 and xm > 1.0:
             right.append(c)
-        elif (abs(x1-y1) < 0.5 and abs(x2-y2) < 0.5
-              and xm > 1.0 and ym > 1.0):
+            continue
+        cross1 = abs(x1 * sin_s - y1 * cos_s)
+        cross2 = abs(x2 * sin_s - y2 * cos_s)
+        dot    = xm * cos_s + ym * sin_s
+        if cross1 < 0.5 and cross2 < 0.5 and dot > 1.0:
             left.append(c)
     return right, left
 
@@ -151,6 +169,87 @@ def _make_magnet_and_pockets(occ, p: MotorParams
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  V-magnet pair + inner d-axis barriers
+# ─────────────────────────────────────────────────────────────────────────────
+def _make_magnet_V(
+    occ, p: MotorParams
+) -> tuple[list[int], list[int]]:
+    """
+    Create V-magnet pair with inner d-axis flux barriers.
+
+    Magnet placement
+    ----------------
+    Asymmetric: d-axis end of each magnet at local y=0 (r = R_mi — the apex
+    of the V), extending toward the sector boundary.
+      right (sign=-1): local y ∈ [−w_mag_v, 0]
+      left  (sign=+1): local y ∈ [0, +w_mag_v]
+    The outer tips (sector-boundary side) may extend beyond θ=0 or θ=θs; they
+    are pre-clipped to the sector [0, θs] via OCC intersect before fragment.
+
+    Inner barrier (one per magnet)
+    --------------------------------
+    Quadrilateral from the magnet d-axis tip (angle θ_m at R_mi..R_mo) to the
+    d-axis iron bridge edge (θ_c ± θ_bh at R_mi..R_mo).  The thin iron strip
+    between the two barriers is preserved as rotor iron.
+
+    Returns (mag_tags, inner_bar_tags) — lists of 2 surface tags: [right, left].
+    """
+    alpha_rad = math.radians(p.alpha_v)
+    θ_c  = p.θs / 2
+    θ_bh = math.atan2(p.t_bridge_inner / 2, p.R_mi)
+
+    mag_tags:       list[int] = []
+    inner_bar_tags: list[int] = []
+
+    # Sector clip: [0, θs] pie at R_ro — pre-clips magnets that stray outside
+    clip_sector = _pie_sector(occ, p.R_ro, 0, p.θs, p.lc_mag)
+    occ.synchronize()
+
+    for sign in (-1, +1):
+        θ_m = θ_c + sign * alpha_rad
+
+        # ── Magnet: d-axis end at local y=0 (r=R_mi), extends toward sector edge
+        y0_rect = -p.w_mag_v if sign == -1 else 0.0
+        t_mag = occ.addRectangle(p.R_mi, y0_rect, 0, p.h_m, p.w_mag_v)
+        occ.rotate([(2, t_mag)], 0, 0, 0, 0, 0, 1, θ_m)
+        occ.synchronize()
+        res, _ = occ.intersect([(2, t_mag)], [(2, clip_sector)],
+                               removeObject=True, removeTool=False)
+        occ.synchronize()
+        mag_tags.append(res[0][1] if res else t_mag)
+
+        # ── Inner d-axis barrier ──────────────────────────────────────────────
+        # Quadrilateral between the magnet d-axis tip (at θ_m) and the bridge
+        # edge (at θ_c ± θ_bh).  P_di/P_do are at local y=0 (the d-axis end).
+        θ_be = θ_c + sign * θ_bh
+        P_di = _rot2d(p.R_mi, 0.0, θ_m)
+        P_do = _rot2d(p.R_mo, 0.0, θ_m)
+        P_bi = (p.R_mi * cos(θ_be), p.R_mi * sin(θ_be))
+        P_bo = (p.R_mo * cos(θ_be), p.R_mo * sin(θ_be))
+
+        pp_di = occ.addPoint(*P_di, 0)
+        pp_do = occ.addPoint(*P_do, 0)
+        pp_bo = occ.addPoint(*P_bo, 0)
+        pp_bi = occ.addPoint(*P_bi, 0)
+
+        # CCW ordering:
+        #   right (sign=-1): P_di → P_do → P_bo → P_bi  (low→high angle)
+        #   left  (sign=+1): P_di → P_bi → P_bo → P_do  (high→low angle)
+        if sign == -1:
+            loop_pts = [pp_di, pp_do, pp_bo, pp_bi]
+        else:
+            loop_pts = [pp_di, pp_bi, pp_bo, pp_do]
+
+        il  = [occ.addLine(loop_pts[i], loop_pts[(i + 1) % 4]) for i in range(4)]
+        icl = occ.addCurveLoop(il)
+        inner_bar_tags.append(occ.addPlaneSurface([icl]))
+
+    occ.remove([(2, clip_sector)], recursive=True)
+    occ.synchronize()
+    return mag_tags, inner_bar_tags
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Main geometry builder
 # ─────────────────────────────────────────────────────────────────────────────
 def build_rotor(
@@ -190,99 +289,122 @@ def build_rotor(
     # ── 2. Rotor iron sector (R_ri → R_ro, full sector) ──────────────────────
     s_rotor = _annular_sector(occ, p.R_ri, p.R_ro, 0, p.θs, p.lc_ro)
 
-    # ── 3. Rectangular magnet + air pockets ───────────────────────────────────
-    s_mag, s_pockets = _make_magnet_and_pockets(occ, p)
-
-    # ── 4. Shaft sector (0 → R_ri) ────────────────────────────────────────────
+    # ── 3. Shaft sector (0 → R_ri) ────────────────────────────────────────────
     s_shaft = _pie_sector(occ, p.R_ri, 0, p.θs, p.lc_ri)
 
-    # (synchronize already called inside _make_magnet_and_pockets)
+    # ── 4. Magnet(s) + air regions — layout-dependent ────────────────────────
+    if p.magnet_layout == "V":
+        s_mags, s_inner_bars = _make_magnet_V(occ, p)
 
-    # ── 5. Fragment (rotor side only — SB stays non-conforming) ───────────────
-    frags = (
-        [(2, s_gap_r), (2, s_rotor), (2, s_shaft), (2, s_mag)]
-        + [(2, t) for t in s_pockets]
-    )
-    occ.fragment(frags, [])
-    occ.synchronize()
+        # frags layout (indices):
+        #   0=gap_r, 1=rotor, 2=shaft,
+        #   3=mag_R, 4=mag_L,
+        #   5=inner_bar_R, 6=inner_bar_L
+        frags = (
+            [(2, s_gap_r), (2, s_rotor), (2, s_shaft)]
+            + [(2, t) for t in s_mags]
+            + [(2, t) for t in s_inner_bars]
+        )
+        _, mapping = occ.fragment(frags, [])
+        occ.synchronize()
 
-    # ── 6. Classify surfaces ─────────────────────────────────────────────────
-    all_surfs = [t for _, t in model.getEntities(2)]
+        gap_r_tags      = [t for _, t in mapping[0]]
+        rotor_iron_tags = [t for _, t in mapping[1]]
+        shaft_tags      = [t for _, t in mapping[2]]
+        mag_R_tags      = [t for _, t in mapping[3]]
+        mag_L_tags      = [t for _, t in mapping[4]]
+        in_bar_R_tags   = [t for _, t in mapping[5]]
+        in_bar_L_tags   = [t for _, t in mapping[6]]
 
-    rotor_iron_tags: list[int] = []
-    magnet_tags:     list[int] = []
-    air_pocket_tags: list[int] = []
-    shaft_tags:      list[int] = []
-    gap_r_tags:      list[int] = []
+        magnet_tags     = mag_R_tags + mag_L_tags
+        air_pocket_tags = in_bar_R_tags + in_bar_L_tags
 
-    # Airgap: thin annular sector — use area, NOT centroid radius.
-    # The centroid of a 45° thin ring sits well inside R_sb (sinc factor
-    # in the centroid integral), so r > R_sb - ε does not work here.
-    A_gap_exp = 0.5 * (p.R_sb**2 - p.R_ro**2) * p.θs
+        A_mag_actual = (
+            sum(_get_rc(occ, t)[2] for t in magnet_tags) if magnet_tags else 0.0
+        )
+        A_mag_ref = p.h_m * p.w_mag_v
 
-    # θ and r reference values for position-based magnet/pocket detection.
-    # Note: the rectangular magnet's outer corners extend beyond R_ro and are
-    # clipped by occ.intersect, so area-based detection fails — use position.
-    θ_c      = p.θs / 2
-    r_mag_c  = p.R_mi + p.h_m / 2
-    half_mag = math.atan2(p.w_mag / 2, r_mag_c)
-    half_pkt = half_mag + math.atan2(max(p.w_air, 0.01), r_mag_c)
+        all_surfs = [t for _, t in model.getEntities(2)]
+        print(f"\nRotor classification [{p.magnet_layout}] ({len(all_surfs)} total surfaces):")
+        print(f"  Rotor iron   : {len(rotor_iron_tags)} surface(s)")
+        print(f"  Magnet (R+L) : {len(magnet_tags)} surface(s)  "
+              f"(A = {A_mag_actual:.1f} mm² actual, {A_mag_ref:.1f} mm² rect each ×2)")
+        print(f"  Barriers     : {len(air_pocket_tags)} surface(s)  "
+              f"(expected 2)")
+        print(f"  Shaft        : {len(shaft_tags)} surface(s)")
+        print(f"  Airgap rotor : {len(gap_r_tags)} surface(s)")
 
-    for tag in all_surfs:
-        r, θ, A = _get_rc(occ, tag)
-        if θ < 0:
-            θ += 2 * π
+        for label, lst, exp in [
+            ("Magnet_R",   mag_R_tags,    1),
+            ("Magnet_L",   mag_L_tags,    1),
+            ("InBar_R",    in_bar_R_tags, 1),
+            ("InBar_L",    in_bar_L_tags, 1),
+            ("Shaft",      shaft_tags,    1),
+            ("Airgap",     gap_r_tags,    1),
+        ]:
+            if len(lst) != exp:
+                print(f"  WARNING: {label} has {len(lst)} surfaces (expected {exp})")
 
-        # ── Airgap: matches expected thin-annulus area ────────────────────
-        if abs(A - A_gap_exp) / A_gap_exp < 0.20:
-            gap_r_tags.append(tag)
-            continue
+    else:
+        # ── Flat magnet path — parent-map based classification ─────────────────
+        s_mag, s_pockets = _make_magnet_and_pockets(occ, p)
 
-        # ── Shaft: small radius ───────────────────────────────────────────
-        if r < p.R_ri + 0.5:
-            shaft_tags.append(tag)
-            continue
+        # frags indices:  0=gap_r, 1=rotor, 2=shaft, 3=mag, 4+=pockets
+        frags = (
+            [(2, s_gap_r), (2, s_rotor), (2, s_shaft), (2, s_mag)]
+            + [(2, t) for t in s_pockets]
+        )
+        _, mapping = occ.fragment(frags, [])
+        occ.synchronize()
 
-        # ── Magnet: radial band + pole-centre angle + area threshold ─────
-        in_mag_r = (p.R_mi - 1.0) < r < (p.R_ro + 0.5)
-        in_mag_θ = abs(θ - θ_c) < half_mag * 1.2
-        if in_mag_r and in_mag_θ and A > 20.0:
-            magnet_tags.append(tag)
-            continue
+        # Each mapping entry may contain duplicates that also appear in other
+        # entries (gmsh reports all intersecting predecessors).  Classify the
+        # "special" regions first from their own mapping entries, then derive
+        # rotor iron as everything not yet classified.
+        all_surfs_set = {t for _, t in model.getEntities(2)}
 
-        # ── Air pocket: same radial band, just outside magnet θ ───────────
-        in_pkt_r = (p.R_mi - 1.0) < r < (p.R_ro + 0.5)
-        in_pkt_θ = half_mag * 0.8 < abs(θ - θ_c) < half_pkt * 1.5
-        if in_pkt_r and in_pkt_θ and p.w_air > 0 and A > 0.01:
-            air_pocket_tags.append(tag)
-            continue
+        def _unique(tags):
+            seen: set[int] = set()
+            out: list[int] = []
+            for t in tags:
+                if t in all_surfs_set and t not in seen:
+                    seen.add(t)
+                    out.append(t)
+            return out
 
-        # ── Everything else → rotor iron ──────────────────────────────────
-        rotor_iron_tags.append(tag)
+        gap_r_tags      = _unique(t for _, t in mapping[0])
+        shaft_tags      = _unique(t for _, t in mapping[2])
+        magnet_tags     = _unique(t for _, t in mapping[3])
+        air_pocket_tags = _unique(
+            t for idx in range(len(s_pockets)) for _, t in mapping[4 + idx]
+        )
 
-    # Actual magnet area (may differ from p.A_mag — corners are clipped to R_ro)
-    A_mag_actual = (
-        sum(_get_rc(occ, t)[2] for t in magnet_tags) if magnet_tags else 0.0
-    )
+        classified = (set(gap_r_tags) | set(shaft_tags)
+                      | set(magnet_tags) | set(air_pocket_tags))
+        rotor_iron_tags = [t for t in all_surfs_set if t not in classified]
 
-    # ── 7. Summary ────────────────────────────────────────────────────────────
-    print(f"\nRotor classification ({len(all_surfs)} total surfaces):")
-    print(f"  Rotor iron   : {len(rotor_iron_tags)} surface(s)")
-    print(f"  Magnet       : {len(magnet_tags)} surface(s)  "
-          f"(A = {A_mag_actual:.1f} mm² actual, {p.A_mag:.1f} mm² rect)")
-    print(f"  Air pockets  : {len(air_pocket_tags)} surface(s)  "
-          f"(expected {len(s_pockets)})")
-    print(f"  Shaft        : {len(shaft_tags)} surface(s)")
-    print(f"  Airgap rotor : {len(gap_r_tags)} surface(s)")
+        all_surfs = [t for _, t in model.getEntities(2)]
+        A_mag_actual = (
+            sum(_get_rc(occ, t)[2] for t in magnet_tags) if magnet_tags else 0.0
+        )
 
-    for label, lst, exp in [
-        ("Magnet",      magnet_tags,     1),
-        ("Air pockets", air_pocket_tags, len(s_pockets)),
-        ("Shaft",       shaft_tags,      1),
-        ("Airgap",      gap_r_tags,      1),
-    ]:
-        if len(lst) != exp:
-            print(f"  WARNING: {label} has {len(lst)} surfaces (expected {exp})")
+        print(f"\nRotor classification [{p.magnet_layout}] ({len(all_surfs)} total surfaces):")
+        print(f"  Rotor iron   : {len(rotor_iron_tags)} surface(s)")
+        print(f"  Magnet       : {len(magnet_tags)} surface(s)  "
+              f"(A = {A_mag_actual:.1f} mm² actual, {p.A_mag:.1f} mm² rect)")
+        print(f"  Air pockets  : {len(air_pocket_tags)} surface(s)  "
+              f"(expected {len(s_pockets)})")
+        print(f"  Shaft        : {len(shaft_tags)} surface(s)")
+        print(f"  Airgap rotor : {len(gap_r_tags)} surface(s)")
+
+        for label, lst, exp in [
+            ("Magnet",      magnet_tags,     1),
+            ("Air pockets", air_pocket_tags, len(s_pockets)),
+            ("Shaft",       shaft_tags,      1),
+            ("Airgap",      gap_r_tags,      1),
+        ]:
+            if len(lst) != exp:
+                print(f"  WARNING: {label} has {len(lst)} surfaces (expected {exp})")
 
     result = {
         "rotor_iron":  rotor_iron_tags,
@@ -309,11 +431,16 @@ def build_rotor(
         else:
             print(f"  SKIP empty group: {name}")
 
-    pg(2, rotor_iron_tags,  "Rotor_Iron")
-    pg(2, magnet_tags,      "Magnet")
-    pg(2, air_pocket_tags,  "AirPocket")
-    pg(2, shaft_tags,       "Shaft")
-    pg(2, gap_r_tags,       "Airgap_Rotor")
+    pg(2, rotor_iron_tags, "Rotor_Iron")
+    if p.magnet_layout == "V":
+        pg(2, mag_R_tags,  "Magnet_R")
+        pg(2, mag_L_tags,  "Magnet_L")
+        pg(2, air_pocket_tags, "Barrier")
+    else:
+        pg(2, magnet_tags,     "Magnet")
+        pg(2, air_pocket_tags, "AirPocket")
+    pg(2, shaft_tags,      "Shaft")
+    pg(2, gap_r_tags,      "Airgap_Rotor")
 
     # ── 9. Physical groups — boundary curves ──────────────────────────────────
     iron_curves  = _get_bound_curves(model, rotor_iron_tags)
@@ -331,7 +458,7 @@ def build_rotor(
     sb_rotor = [max(gap_arc_len, key=gap_arc_len.get)] if gap_arc_len else []
 
     excl = set(sb_rotor)
-    ro_right, ro_left = _classify_sector_bounds(model, all_rotor_curves, excl)
+    ro_right, ro_left = _classify_sector_bounds(model, all_rotor_curves, excl, p.θs)
 
     pg(1, sb_rotor,  "SB_Rotor")
     pg(1, ro_right,  "Rotor_Right")

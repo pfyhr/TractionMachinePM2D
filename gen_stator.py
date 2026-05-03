@@ -22,6 +22,7 @@ from typing import Optional
 import gmsh
 
 from motor_params import MotorParams, DEFAULT_PARAMS
+from winding_config import winding_phase_map
 
 π = math.pi
 cos, sin = math.cos, math.sin
@@ -70,13 +71,16 @@ def _curve_rc(occ, ctag: int) -> float:
 
 
 def _classify_sector_bounds(
-    model, curve_set: set[int], excl: set[int]
+    model, curve_set: set[int], excl: set[int], theta_s: float
 ) -> tuple[list[int], list[int]]:
+    """Split curves into right (θ=0) and left (θ=θs) sector boundaries.
+
+    Uses the cross-product formula |x·sin(θs) − y·cos(θs)| < tol for the
+    left boundary, generalising the hardcoded x≈y check (θs=45°) to any
+    pole count.
     """
-    Split curve_set into right (θ=0 radial line) and left (θ=45° radial line).
-    Radial line at θ=0  → both bbox corners have y ≈ 0.
-    Radial line at θ=45° → both bbox corners have x ≈ y.
-    """
+    sin_s = math.sin(theta_s)
+    cos_s = math.cos(theta_s)
     right, left = [], []
     for c in sorted(curve_set - excl):
         x1, y1, _, x2, y2, _ = model.getBoundingBox(1, c)
@@ -85,7 +89,11 @@ def _classify_sector_bounds(
             continue
         if abs(y1) < 0.5 and abs(y2) < 0.5 and xm > 1.0:
             right.append(c)
-        elif abs(x1-y1) < 0.5 and abs(x2-y2) < 0.5 and xm > 1.0 and ym > 1.0:
+            continue
+        cross1 = abs(x1 * sin_s - y1 * cos_s)
+        cross2 = abs(x2 * sin_s - y2 * cos_s)
+        dot    = xm * cos_s + ym * sin_s
+        if cross1 < 0.5 and cross2 < 0.5 and dot > 1.0:
             left.append(c)
     return right, left
 
@@ -164,77 +172,62 @@ def build_stator(
         + [(2, t) for t in all_bodies]
         + [(2, t) for t in all_hps]
     )
-    occ.fragment(frags, [])
+    _, mapping = occ.fragment(frags, [])
     occ.synchronize()
 
-    # ── 5. Classify surfaces ─────────────────────────────────────────────────
-    all_surfs = [t for _, t in model.getEntities(2)]
+    # ── 5. Classify surfaces via fragment parent-map ─────────────────────────
+    # frags order: [0]=s_stator, [1]=s_gap_s, [2..ns+1]=openings,
+    #              [ns+2..2*ns+1]=bodies, [2*ns+2..end]=hps (i*n_hp+k order)
+    all_surfs_set = {t for _, t in model.getEntities(2)}
+    all_surfs     = list(all_surfs_set)
 
-    stator_iron_tags: list[int]             = []
-    gap_s_tags:       list[int]             = []
+    def _unique_from(tags_iter) -> list[int]:
+        seen: set[int] = set()
+        out:  list[int] = []
+        for t in tags_iter:
+            if t in all_surfs_set and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
+
+    gap_s_tags:       list[int]             = _unique_from(
+        t for _, t in mapping[1]
+    )
     slot_open_tags:   list[list[int]]       = [[] for _ in range(p.ns)]
-    slot_insul_tags:  list[list[int]]       = [[] for _ in range(p.ns)]
     slot_hp_tags:     list[list[list[int]]] = [[[] for _ in range(p.n_hp)]
                                                 for _ in range(p.ns)]
+    slot_insul_tags:  list[list[int]]       = [[] for _ in range(p.ns)]
 
-    # Radial bounds for "inside slot body" region
-    R_slot_bot = p.R_si + p.h1 - 0.3
-    R_slot_top = p.R_si + p.h1 + p.h_slot + 0.3
+    for i in range(p.ns):
+        slot_open_tags[i] = _unique_from(t for _, t in mapping[2 + i])
+        for k in range(p.n_hp):
+            frag_idx = 2 + p.ns + p.ns + i * p.n_hp + k
+            slot_hp_tags[i][k] = _unique_from(t for _, t in mapping[frag_idx])
 
-    for tag in all_surfs:
-        r, θ, A = _get_rc(occ, tag)
-        if θ < 0:
-            θ += 2 * π   # normalise to [0, 2π)
+    # Insulation for slot i = slot-body surfaces minus its openings and HPs
+    for i in range(p.ns):
+        body_surfs = _unique_from(t for _, t in mapping[2 + p.ns + i])
+        slot_surfs = (set(slot_open_tags[i])
+                      | {t for k in range(p.n_hp) for t in slot_hp_tags[i][k]})
+        slot_insul_tags[i] = [t for t in body_surfs if t not in slot_surfs]
 
-        # ── Airgap: centroid between R_sb and R_si ────────────────────────
-        if r < p.R_si - 0.05:
-            gap_s_tags.append(tag)
-            continue
-
-        # ── Stator iron: above slot region, or very large ─────────────────
-        if r > R_slot_top or A > 500:
-            stator_iron_tags.append(tag)
-            continue
-
-        # ── Which slot (by centroid angle)? ──────────────────────────────
-        slot_idx = -1
-        for i in range(p.ns):
-            θ_c = (i + 0.5) * p.sp
-            if abs(θ - θ_c) < p.sp * 0.55:
-                slot_idx = i
-                break
-        if slot_idx < 0:
-            # Half-tooth at sector boundary → iron
-            stator_iron_tags.append(tag)
-            continue
-
-        # ── Slot opening: very small area at bore ─────────────────────────
-        if r < p.R_si + p.h1 + 0.3 and A < 3.0:
-            slot_open_tags[slot_idx].append(tag)
-            continue
-
-        # ── Hairpin: area matches A_hp within 10 % ────────────────────────
-        if p.A_hp > 0 and abs(A - p.A_hp) / p.A_hp < 0.10:
-            matched_k = -1
-            for k in range(p.n_hp):
-                r_exp = p.R_si + p.h1 + p.t_liner + (k + 0.5) * p.h_layer
-                if abs(r - r_exp) < p.h_layer * 0.45:
-                    matched_k = k
-                    break
-            if matched_k >= 0:
-                slot_hp_tags[slot_idx][matched_k].append(tag)
-                continue
-
-        # ── Everything else inside the slot region → insulation / liner ───
-        slot_insul_tags[slot_idx].append(tag)
+    # Stator iron = everything not classified above
+    classified: set[int] = set(gap_s_tags)
+    for i in range(p.ns):
+        classified.update(slot_open_tags[i])
+        classified.update(slot_insul_tags[i])
+        for k in range(p.n_hp):
+            classified.update(slot_hp_tags[i][k])
+    stator_iron_tags: list[int] = [t for t in all_surfs if t not in classified]
 
     # ── 6. Sanity check and summary ──────────────────────────────────────────
+    _phase_map = winding_phase_map(p.ns)
     print(f"\nStator classification ({len(all_surfs)} total surfaces):")
     print(f"  Stator iron  : {len(stator_iron_tags)} surface(s)")
     print(f"  Airgap       : {len(gap_s_tags)} surface(s)")
     for i in range(p.ns):
         n_hp_found = sum(len(slot_hp_tags[i][k]) for k in range(p.n_hp))
-        print(f"  Slot {i} ({_PHASE_MAP[i]:2s}): "
+        print(f"  Slot {i} ({_phase_map[i]:2s}): "
               f"opening={len(slot_open_tags[i])}, "
               f"HP={n_hp_found}/{p.n_hp}, "
               f"insul={len(slot_insul_tags[i])}")
@@ -277,8 +270,9 @@ def build_stator(
 
     pg(2, stator_iron_tags, "Stator_Iron")
     pg(2, gap_s_tags,       "Airgap_Stator")
+    _phase_map = winding_phase_map(p.ns)
     for i in range(p.ns):
-        ph = _PHASE_MAP[i]
+        ph = _phase_map[i]
         pg(2, slot_open_tags[i],  f"S{i}_Opening")
         pg(2, slot_insul_tags[i], f"S{i}_Insul")
         for k in range(p.n_hp):
@@ -292,11 +286,13 @@ def build_stator(
     slot_curves  = _get_bound_curves(model, slot_all_surf)
     gap_curves   = _get_bound_curves(model, gap_s_tags)
 
-    # Outer arc (Domain): curves at r > 100 mm
+    # Outer arc (Domain): the arc at R_so.
+    # Identified by: x_max ≈ R_so (the arc passes through θ=0) AND the curve
+    # spans a non-trivial y range (distinguishes it from radial boundary lines).
     domain_tags = []
     for c in iron_curves:
         x1, y1, _, x2, y2, _ = model.getBoundingBox(1, c)
-        if math.hypot((x1+x2)/2, (y1+y2)/2) > 100:
+        if x2 > p.R_so - 0.5 and (y2 - y1) > 1.0:
             domain_tags.append(c)
 
     # SB_Stator: inner arc of airgap sector — minimum r_c among gap arcs < 73 mm
@@ -307,7 +303,7 @@ def build_stator(
     # Sector boundaries
     excl = set(domain_tags) | set(sb_stator)
     all_stator_curves = iron_curves | slot_curves | gap_curves
-    st_right, st_left = _classify_sector_bounds(model, all_stator_curves, excl)
+    st_right, st_left = _classify_sector_bounds(model, all_stator_curves, excl, p.θs)
 
     pg(1, domain_tags, "Domain")
     pg(1, sb_stator,   "SB_Stator")

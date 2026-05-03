@@ -49,6 +49,14 @@ class MotorParams:
     h_bridge:  float =  4.0  # iron bridge above magnet (R_mo = R_ro - h_bridge)
     w_air:     float =  2.0  # air-pocket width at each magnet end
 
+    # ── V-magnet topology (used when magnet_layout='V') ───────────────────────
+    magnet_layout:   str   = "flat"  # "flat" | "V"
+    alpha_v:         float = 10.0   # half V-angle: angular offset of each magnet
+                                    # centre from d-axis [mechanical deg]
+    w_mag_v:         float = 20.0   # V-magnet long dimension (wm) [mm]
+    t_bridge_outer:  float =  1.0   # thin OD bridge at barrier tips [mm]
+    t_bridge_inner:  float =  2.0   # d-axis iron bridge width [mm]
+
     # ── Magnet material (default: N45SH NdFeB at 20 °C) ─────────────────────
     # N45SH: Br=1.35 T, Hci≈2000 kA/m (SH high-temp grade), mu_r≈1.05,
     #        σ≈625 kS/m (ρ≈1.6 µΩ·m), density≈7500 kg/m³
@@ -323,11 +331,12 @@ class MotorParams:
                 f"insulation is unphysically thin."
             )
 
-        # ── Magnet ────────────────────────────────────────────────────────────
-        if self.mag_frac <= 0 or self.mag_frac >= 1:
+        # ── Magnet layout ─────────────────────────────────────────────────────
+        if self.magnet_layout not in ("flat", "V"):
             errors.append(
-                f"mag_frac={self.mag_frac} must be in (0, 1)."
+                f"magnet_layout='{self.magnet_layout}' must be 'flat' or 'V'."
             )
+
         if self.h_m <= 0:
             errors.append(f"Magnet depth h_m={self.h_m} mm must be positive.")
         if self.h_bridge < 0:
@@ -336,11 +345,33 @@ class MotorParams:
             errors.append(
                 f"Magnet inner radius R_mi={self.R_mi:.2f} ≤ shaft outer R_ri={self.R_ri}."
             )
-        if self.w_mag + 2 * self.w_air > self.R_ro * self.θs * self.mag_frac * 1.5:
-            # rough sanity only — exact fit check is geometric
-            pass
-        if self.w_air < 0:
-            errors.append(f"Air pocket width w_air={self.w_air} must be ≥ 0.")
+
+        if self.magnet_layout == "flat":
+            if self.mag_frac <= 0 or self.mag_frac >= 1:
+                errors.append(f"mag_frac={self.mag_frac} must be in (0, 1).")
+            if self.w_air < 0:
+                errors.append(f"Air pocket width w_air={self.w_air} must be ≥ 0.")
+
+        if self.magnet_layout == "V":
+            half_sector_deg = math.degrees(self.θs) / 2
+            if not (0 < self.alpha_v < half_sector_deg * 0.9):
+                errors.append(
+                    f"alpha_v={self.alpha_v:.1f}° must be in "
+                    f"(0, {half_sector_deg*0.9:.1f}°) for Qp={self.Qp} "
+                    f"(half-sector = {half_sector_deg:.1f}° mech)."
+                )
+            if self.w_mag_v <= 0:
+                errors.append(f"w_mag_v={self.w_mag_v} mm must be positive.")
+            if self.t_bridge_outer < 0.5:
+                errors.append(
+                    f"t_bridge_outer={self.t_bridge_outer} mm < 0.5 mm "
+                    f"manufacturing minimum."
+                )
+            if self.t_bridge_inner < 0.5:
+                errors.append(
+                    f"t_bridge_inner={self.t_bridge_inner} mm < 0.5 mm "
+                    f"manufacturing minimum."
+                )
 
         if errors:
             raise ValueError("MotorParams validation failed:\n" +
@@ -372,12 +403,25 @@ class MotorParams:
             f"({self.Carea*1e6:.3f} mm²)",
             f"  Fill factor           : {self.fill_factor*100:.1f} %",
             "-" * 60,
-            f"  Magnet (w × h)        : {self.w_mag:.2f} × {self.h_m:.1f} mm",
+            f"  Magnet layout         : {self.magnet_layout.upper()}",
             f"  Magnet material       : Br={self.B_r:.2f} T  mu_r={self.mu_r}  (N45SH)",
             f"  Iron bridge           : {self.h_bridge:.1f} mm  "
             f"(R_mo={self.R_mo:.2f}, R_mi={self.R_mi:.2f} mm)",
-            f"  Magnet fraction       : {self.mag_frac*100:.0f}% of pole pitch",
-            f"  Air pocket width      : {self.w_air:.1f} mm",
+        ]
+        if self.magnet_layout == "flat":
+            lines += [
+                f"  Magnet (w × h)        : {self.w_mag:.2f} × {self.h_m:.1f} mm",
+                f"  Magnet fraction       : {self.mag_frac*100:.0f}% of pole pitch",
+                f"  Air pocket width      : {self.w_air:.1f} mm",
+            ]
+        else:  # V
+            lines += [
+                f"  V-magnet (wm × hm)    : {self.w_mag_v:.2f} × {self.h_m:.1f} mm",
+                f"  Half V-angle          : {self.alpha_v:.1f}° mech from d-axis",
+                f"  Outer bridge          : {self.t_bridge_outer:.1f} mm",
+                f"  D-axis bridge         : {self.t_bridge_inner:.1f} mm",
+            ]
+        lines += [
             "-" * 60,
             f"  Speed / frequency     : {self.rpm:.0f} rpm / {self.f_el:.0f} Hz",
             f"  Peak current          : {self.Is:.0f} A",
@@ -478,6 +522,70 @@ def suggest_slot(
         "Carea_m2":    n_hp * (b_slot - 2*t_liner - 2*t_enam) *
                        ((h_slot - 2*t_liner)/n_hp - 2*t_enam) * 1e-6,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Factory: create MotorParams for any pole count
+# ─────────────────────────────────────────────────────────────────────────────
+def motor_params_for_poles(Qp: int, q: int = 2, **overrides) -> MotorParams:
+    """
+    Build a MotorParams scaled for *Qp* poles using Qs = q * m * Qp slots.
+
+    Keeps the fixed stator/rotor envelope (R_si=74, R_so=110, g=0.75,
+    h_bridge=4, h_m=4) and scales slot width (b_slot, b1) to the slot pitch.
+    mag_frac is capped so the rectangular magnet inner corners stay inside R_ro.
+
+    Any keyword arguments in *overrides* are passed straight through to
+    MotorParams and take precedence.
+    """
+    if Qp < 2 or Qp % 2 != 0:
+        raise ValueError(f"Qp={Qp} must be a positive even integer")
+    m = 3
+    Qs = q * m * Qp
+
+    # Fixed envelope (same as default reference design)
+    R_si    = overrides.get("R_si",    74.0)
+    R_so    = overrides.get("R_so",   110.0)
+    g       = overrides.get("g",        0.75)
+    h_bridge = overrides.get("h_bridge", 4.0)
+    h_m     = overrides.get("h_m",      4.0)
+    h1      = overrides.get("h1",       0.5)
+    h_slot  = overrides.get("h_slot",  19.5)
+
+    R_ro = R_si - g
+    R_mi = R_ro - h_bridge - h_m
+
+    θs = 2 * π / Qp
+    slot_pitch_bore = 2 * π * R_si / Qs
+
+    # Slot opening: leave ≥ 1.5 mm tooth tip
+    b1 = min(2.5, slot_pitch_bore - 1.5)
+    b1 = max(b1, 1.0)
+
+    # Slot body: ~55 % of slot pitch at mid-slot radius
+    r_mid = R_si + h1 + h_slot / 2
+    slot_pitch_mid = 2 * π * r_mid / Qs
+    b_slot = slot_pitch_mid * 0.55
+    b_slot = max(b_slot, b1 + 0.2)
+    b_slot = min(b_slot, slot_pitch_mid - 1.0)
+    b_slot = round(b_slot, 1)
+
+    # mag_frac: inner corners at radius sqrt(R_mi² + (w_mag/2)²) ≤ R_ro
+    # → sin(mag_frac * θs/2) ≤ sqrt(R_ro²−R_mi²) / R_mi
+    max_sin = math.sqrt(max(R_ro**2 - R_mi**2, 0.0)) / R_mi
+    max_half_angle = math.asin(min(max_sin, 1.0))
+    max_mag_frac = max_half_angle / (θs / 2)
+    mag_frac = min(0.80, max_mag_frac * 0.92)  # 8 % margin inside limit
+
+    defaults = dict(
+        Qs=Qs,
+        Qp=Qp,
+        b1=round(b1, 2),
+        b_slot=b_slot,
+        mag_frac=round(mag_frac, 3),
+    )
+    defaults.update(overrides)
+    return MotorParams(**defaults)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

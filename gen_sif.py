@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from motor_params import MotorParams, DEFAULT_PARAMS
+from winding_config import winding_phase_map
 
 π  = math.pi
 μ0 = 4e-7 * π   # permeability of free space [H/m]
@@ -105,7 +106,7 @@ def conductor_body_map(
     """
     p = params
     if phase_map is None:
-        phase_map = _PHASE_MAP[:]
+        phase_map = winding_phase_map(p.ns)
     result: dict[str, list[int]] = {}
     n = 1
     n += 1  # Stator_Iron
@@ -161,7 +162,7 @@ def gen_sif(
     p = params
 
     if phase_map is None:
-        phase_map = _PHASE_MAP[:]
+        phase_map = winding_phase_map(p.ns)
 
     if len(phase_map) != p.ns:
         raise ValueError(
@@ -174,8 +175,11 @@ def gen_sif(
             )
 
     # ── Derived electromagnetic parameters ─────────────────────────────────
-    H_PM   = p.B_r / (p.mu_r * μ0)   # magnet H-field [A/m]
-    Mangle = math.degrees(p.θs / 2)  # magnet sector-centre angle [deg]
+    H_PM    = p.B_r / (p.mu_r * μ0)    # magnet H-field [A/m]
+    Mangle  = math.degrees(p.θs / 2)   # magnet sector-centre angle [deg]
+    # V-magnet: magnetisation angles offset by ±alpha_v from d-axis
+    Mangle_R = Mangle - p.alpha_v      # right magnet  (sign = -1)
+    Mangle_L = Mangle + p.alpha_v      # left magnet   (sign = +1)
 
     # ── Body force assignment ───────────────────────────────────────────────
     # BF 1 = rotor rotation (no current density)
@@ -203,15 +207,24 @@ def gen_sif(
             body_num[f"S{i}_HP{k}_{ph}"] = n; n += 1
     body_num["Airgap_Rotor"] = n; n += 1
     body_num["Rotor_Iron"]   = n; n += 1
-    body_num["Magnet"]       = n; n += 1
-    if p.w_air > 0:
-        body_num["AirPocket"] = n; n += 1
+    if p.magnet_layout == "V":
+        body_num["Magnet_R"] = n; n += 1
+        body_num["Magnet_L"] = n; n += 1
+        body_num["Barrier"]  = n; n += 1
+    else:
+        body_num["Magnet"]   = n; n += 1
+        if p.w_air > 0:
+            body_num["AirPocket"] = n; n += 1
     body_num["Shaft"]        = n; n += 1
 
     # Rotor body indices for RigidMeshMapper
-    rotor_names = ["Airgap_Rotor", "Rotor_Iron", "Magnet"]
-    if p.w_air > 0:
-        rotor_names.append("AirPocket")
+    rotor_names = ["Airgap_Rotor", "Rotor_Iron"]
+    if p.magnet_layout == "V":
+        rotor_names += ["Magnet_R", "Magnet_L", "Barrier"]
+    else:
+        rotor_names.append("Magnet")
+        if p.w_air > 0:
+            rotor_names.append("AirPocket")
     rotor_names.append("Shaft")
     rotor_ids = [body_num[nm] for nm in rotor_names]
 
@@ -246,6 +259,12 @@ def gen_sif(
         f"$ Is = {p.Is}              ! Peak phase current [A]",
         f"$ Carea = {p.Carea:.6e}    ! Conductor area per slot [m²]",
         f"$ Mangle1 = {Mangle:.4f}   ! Magnet centre angle in sector [deg]",
+        *(
+            [
+                f"$ Mangle_R = {Mangle_R:.4f} ! V right-magnet magnetisation angle [deg]",
+                f"$ Mangle_L = {Mangle_L:.4f} ! V left-magnet magnetisation angle [deg]",
+            ] if p.magnet_layout == "V" else []
+        ),
         "$ DegreesPerSec = WM*180.0/pi",
         f"$ RotorInitPos = {rotor_init_pos}",
         f"$ gamma_deg = {gamma_deg:.4f}    ! Current advance angle (0=q-axis, -=IPM MTPA)",
@@ -338,22 +357,40 @@ def gen_sif(
         "End",
         "",
         "Material 5",
-        '  Name = "N45SH"',
+        f'  Name = "N45SH{"_R (right)" if p.magnet_layout == "V" else ""}"',
         f"  ! NdFeB N45SH: Br={p.B_r:.3f} T, Hci≈2000 kA/m, mu_r={p.mu_r}, sigma={N45SH_SIGMA/1e3:.0f} kS/m",
         f"  Relative Permeability = {p.mu_r}",
         "  Relative Permittivity = 1",
         f"  ! H_PM = Br / (mu_r * mu0) = {H_PM:.0f} A/m",
         "",
         "  Magnetization 1 = Variable time",
-        '    Real MATC "H_PM*cos(rot_dir*WM*tx(0) + (RotorInitPos + Mangle1)*pi/180)"',
+        f'    Real MATC "H_PM*cos(rot_dir*WM*tx(0) + (RotorInitPos + {"Mangle_R" if p.magnet_layout == "V" else "Mangle1"})*pi/180)"',
         "  Magnetization 2 = Variable time",
-        '    Real MATC "H_PM*sin(rot_dir*WM*tx(0) + (RotorInitPos + Mangle1)*pi/180)"',
+        f'    Real MATC "H_PM*sin(rot_dir*WM*tx(0) + (RotorInitPos + {"Mangle_R" if p.magnet_layout == "V" else "Mangle1"})*pi/180)"',
         "",
         f"  Electric Conductivity = {N45SH_SIGMA:.1f}  ! rho ≈ 1.6 µΩ·m",
         f"  Density = {N45SH_DENSITY:.1f}              ! kg/m³",
         "End",
         "",
     ]
+    if p.magnet_layout == "V":
+        L += [
+            "Material 6",
+            '  Name = "N45SH_L (left)"',
+            f"  ! NdFeB N45SH: same grade, different magnetisation direction",
+            f"  Relative Permeability = {p.mu_r}",
+            "  Relative Permittivity = 1",
+            "",
+            "  Magnetization 1 = Variable time",
+            '    Real MATC "H_PM*cos(rot_dir*WM*tx(0) + (RotorInitPos + Mangle_L)*pi/180)"',
+            "  Magnetization 2 = Variable time",
+            '    Real MATC "H_PM*sin(rot_dir*WM*tx(0) + (RotorInitPos + Mangle_L)*pi/180)"',
+            "",
+            f"  Electric Conductivity = {N45SH_SIGMA:.1f}",
+            f"  Density = {N45SH_DENSITY:.1f}",
+            "End",
+            "",
+        ]
 
     # ── Body Forces ─────────────────────────────────────────────────────────
     L += [
@@ -399,11 +436,19 @@ def gen_sif(
     L.append("")
     L += body_block(body_num["Rotor_Iron"], "Rotor_Iron", 2, 4, bf=1, tg=1)
     L.append("")
-    L += body_block(body_num["Magnet"], "Magnet", 1, 5, bf=1, tg=1)
-    L.append("")
-    if p.w_air > 0:
-        L += body_block(body_num["AirPocket"], "AirPocket", 1, 1, bf=1, tg=1)
+    if p.magnet_layout == "V":
+        L += body_block(body_num["Magnet_R"], "Magnet_R", 1, 5, bf=1, tg=1)
         L.append("")
+        L += body_block(body_num["Magnet_L"], "Magnet_L", 1, 6, bf=1, tg=1)
+        L.append("")
+        L += body_block(body_num["Barrier"],  "Barrier",  1, 1, bf=1, tg=1)
+        L.append("")
+    else:
+        L += body_block(body_num["Magnet"], "Magnet", 1, 5, bf=1, tg=1)
+        L.append("")
+        if p.w_air > 0:
+            L += body_block(body_num["AirPocket"], "AirPocket", 1, 1, bf=1, tg=1)
+            L.append("")
     L += body_block(body_num["Shaft"], "Shaft", 1, 1, bf=1, tg=1)
     L.append("")
 
