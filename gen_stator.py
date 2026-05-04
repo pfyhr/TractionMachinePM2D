@@ -128,6 +128,7 @@ def build_stator(
     p = params
 
     gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
     gmsh.model.add("Stator")
     occ   = gmsh.model.occ
     model = gmsh.model

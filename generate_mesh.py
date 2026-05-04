@@ -63,6 +63,7 @@ print(f"  θ_ml={math.degrees(θ_ml):.2f}°  θ_mr={math.degrees(θ_mr):.2f}°")
 #  gmsh setup
 # ═══════════════════════════════════════════════════════════════════════════════
 gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
 gmsh.model.add("TractionPM2D")
 occ = gmsh.model.occ
 

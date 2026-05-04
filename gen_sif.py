@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import cmath
 import math
 from pathlib import Path
 from typing import Optional
@@ -181,6 +182,34 @@ def gen_sif(
     Mangle_R = Mangle - p.alpha_v      # right magnet  (sign = -1)
     Mangle_L = Mangle + p.alpha_v      # left magnet   (sign = +1)
 
+    # Phase-A axis from the slot pattern: angle of the fundamental winding
+    # phasor Σ sign·exp(j·PP·θ_slot) over A+/A- slots in the sector. For full-
+    # pitch single-layer windings (only A+ in sector, A- comes from anti-
+    # periodic continuation in the next sector), this puts the axis at the
+    # midpoint of the A+ belt and its anti-periodic A- counterpart.
+    # Default 48s/8p q=2 [A+,A+,C-,C-,B+,B+]: 30° mech (120° elec).
+    sp_rad = p.sp
+    phasor = 0 + 0j
+    for k, ph in enumerate(phase_map):
+        if ph == "A+":
+            sign = +1
+        elif ph == "A-":
+            sign = -1
+        else:
+            continue
+        theta_el = p.PP * (k + 0.5) * sp_rad
+        phasor += sign * cmath.exp(1j * theta_el)
+    if abs(phasor) < 1e-12:
+        Mangle_A_el = 0.0
+    else:
+        Mangle_A_el = cmath.phase(phasor)            # [rad elec]
+    Mangle_A = math.degrees(Mangle_A_el) / p.PP      # [deg mech]
+    # d-axis position relative to the phase-A axis [deg mech]. Body-force
+    # formula treats this as the rotor d-axis at t=0 in the phase-A frame,
+    # so the standard Park-transform "γ measured from q-axis" convention
+    # gives γ=0 → q-axis aligned current.
+    Mangle_dq = Mangle - Mangle_A
+
     # ── Body force assignment ───────────────────────────────────────────────
     # BF 1 = rotor rotation (no current density)
     # BF 2, 3, ... = unique (phase_index, sign) combos, in appearance order
@@ -256,9 +285,13 @@ def gen_sif(
         f"$ WM = 2*pi*{p.rpm}/60       ! Mechanical angular velocity [rad/s]",
         f"$ PP = {p.PP}",
         f"$ H_PM = {H_PM:.1f}           ! Magnet H-field [A/m]",
-        f"$ Is = {p.Is}              ! Peak phase current [A]",
+        f"$ Is = {p.Is}              ! Peak per-conductor current [A]",
         f"$ Carea = {p.Carea:.6e}    ! Conductor area per slot [m²]",
+        f"$ n_hp = {p.n_hp}              ! conductors-in-series per slot",
+        f"$ Jslot = n_hp*Is/Carea  ! Peak slot current density [A/m²]",
         f"$ Mangle1 = {Mangle:.4f}   ! Magnet centre angle in sector [deg]",
+        f"$ Mangle_A = {Mangle_A:.4f}  ! Phase-A axis position in sector [deg]",
+        f"$ Mangle_dq = {Mangle_dq:.4f} ! d-axis relative to phase-A axis [deg]",
         *(
             [
                 f"$ Mangle_R = {Mangle_R:.4f} ! V right-magnet magnetisation angle [deg]",
@@ -402,12 +435,12 @@ def gen_sif(
     ]
     for ph_str, bf_num in sorted(hp_to_bf.items(), key=lambda x: x[1]):
         ph_idx, sign = _PHASE_DECODE[ph_str]
-        jstr = "Is/Carea" if sign > 0 else "-Is/Carea"
+        jstr = "Jslot" if sign > 0 else "-Jslot"
         L += [
             f"Body Force {bf_num}",
             f'  Name = "Phase_{ph_str}_BF"',
             "  Current Density = Variable time",
-            f'    Real MATC "{jstr}*sin(tx(0)*2*pi*fel - {ph_idx}*2*pi/3 - PP*(RotorInitPos+Mangle1)*pi/180 - gamma_deg*pi/180)"',
+            f'    Real MATC "{jstr}*sin(tx(0)*2*pi*fel - {ph_idx}*2*pi/3 - PP*(RotorInitPos+Mangle_dq)*pi/180 - gamma_deg*pi/180)"',
             "End",
             "",
         ]

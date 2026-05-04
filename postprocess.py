@@ -565,7 +565,9 @@ def compute_bemf(
             integral = (a_elem[mask_p] * area_elem[mask_p]).sum() \
                      - (a_elem[mask_m] * area_elem[mask_m]).sum()
 
-            psi[ph].append(SCALE / Carea * integral)
+            # SCALE/Carea × ∫A dΩ gives flux linkage assuming 1 turn per slot.
+            # Multiply by n_hp (conductors-in-series per slot) to get phase Ψ.
+            psi[ph].append(p.n_hp * SCALE / Carea * integral)
 
     n = len(vtu_files)
     t_s = np.arange(1, n + 1) * dt

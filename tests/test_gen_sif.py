@@ -132,12 +132,14 @@ class TestBodyForces:
     def test_current_density_in_bf(self, default_sif):
         _, s = default_sif
         assert "Current Density = Variable time" in s
-        assert "Is/Carea" in s
+        # Jslot = n_hp*Is/Carea is the true slot-AT density (n_hp turns in series)
+        assert "Jslot" in s
+        assert "n_hp*Is/Carea" in s
 
     def test_negative_direction_in_bf(self, default_sif):
         _, s = default_sif
-        # C- has sign=-1 → "-Is/Carea"
-        assert "-Is/Carea" in s
+        # C- has sign=-1 → "-Jslot"
+        assert "-Jslot" in s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
