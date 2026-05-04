@@ -498,6 +498,24 @@ def build_mesh(
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature",      0)
     gmsh.option.setNumber("Mesh.Algorithm", 6)   # Frontal-Delaunay
 
+    # Force the mesh on the LEFT sector boundary to be a rotation copy of
+    # the RIGHT boundary so Elmer's Conforming-BC sees matching nodes
+    # after pairing through the anti-radial projector. Without this,
+    # gmsh meshes Right and Left independently and they only happen to
+    # match for the symmetric default geometry (θs=45°, Qp=8).
+    cos_t = math.cos(p.θs)
+    sin_t = math.sin(p.θs)
+    affine_rot = [
+        cos_t, -sin_t, 0.0, 0.0,
+        sin_t,  cos_t, 0.0, 0.0,
+        0.0,    0.0,   1.0, 0.0,
+        0.0,    0.0,   0.0, 1.0,
+    ]
+    if st_right and st_left:
+        model.mesh.setPeriodic(1, st_left, st_right, affine_rot)
+    if ro_right and ro_left:
+        model.mesh.setPeriodic(1, ro_left, ro_right, affine_rot)
+
     # ═══════════════════════════════════════════════════════════════════════
     #  GENERATE MESH
     # ═══════════════════════════════════════════════════════════════════════
