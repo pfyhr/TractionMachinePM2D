@@ -60,8 +60,13 @@ class MotorParams:
     # ── Magnet material (default: N45SH NdFeB at 20 °C) ─────────────────────
     # N45SH: Br=1.35 T, Hci≈2000 kA/m (SH high-temp grade), mu_r≈1.05,
     #        σ≈625 kS/m (ρ≈1.6 µΩ·m), density≈7500 kg/m³
-    B_r:   float = 1.35   # remanence [T]
-    mu_r:  float = 1.05   # relative permeability of magnet
+    B_r:           float = 1.35      # remanence [T]
+    mu_r:          float = 1.05      # relative permeability of magnet
+    magnet_sigma:  float = 625_000.0 # electrical conductivity [S/m]; set to
+                                     # 0.0 to suppress eddy currents in the
+                                     # magnet (cleaner steady-state torque /
+                                     # BEMF at the cost of ignoring real
+                                     # eddy-loss heating of the magnets).
 
     # ── Operational ───────────────────────────────────────────────────────────
     rpm:      float = 1500.0  # rated speed
