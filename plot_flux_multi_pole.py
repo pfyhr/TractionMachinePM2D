@@ -173,8 +173,14 @@ def main() -> None:
     if skipped:
         print(f"Skipped Qp values (mesh / mortar BC failure): {skipped}")
 
-    vmax = max(B.max() for _, _, _, _, B in panels)
-    print(f"Global |B| max for shared colormap: {vmax:.2f} T")
+    # Clip colormap to robust 99th percentile to ignore single-node outliers
+    # at sector corners / degenerate triangles (which can hit ~10+ T from
+    # divergence-free violations on tiny elements).
+    all_B = np.concatenate([B for _, _, _, _, B in panels])
+    vmax = float(np.percentile(all_B, 99.5))
+    vmax = min(vmax, 3.0)  # iron saturates well below 3 T
+    print(f"Global |B| (99.5 percentile, capped at 3.0): {vmax:.2f} T  "
+          f"[raw max: {all_B.max():.2f} T]")
 
     nrows, ncols = 2, 5
     fig, axes = plt.subplots(nrows, ncols, figsize=(18, 7.5))

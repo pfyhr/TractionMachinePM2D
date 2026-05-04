@@ -78,16 +78,30 @@ def _curve_length(occ, ctag):
     return occ.getMass(1, ctag)
 
 
-def _classify_sector_bounds(model, curve_set, excl):
+def _classify_sector_bounds(model, curve_set, excl, theta_s):
+    """Split curves into right (θ=0) and left (θ=θs) sector boundaries.
+
+    For any pole count: right boundary lies on +x axis (y≈0); left
+    boundary lies on the line x·sin(θs)−y·cos(θs)=0 with the dot
+    (x·cos(θs)+y·sin(θs)) positive (i.e. pointing outward from origin).
+    """
+    sin_s = math.sin(theta_s)
+    cos_s = math.cos(theta_s)
     right, left = [], []
     for c in sorted(curve_set - excl):
         x1, y1, _, x2, y2, _ = model.getBoundingBox(1, c)
         xm, ym = (x1 + x2) / 2, (y1 + y2) / 2
         if math.hypot(xm, ym) < 0.5:
             continue
+        # Right boundary: on +x axis
         if abs(y1) < 0.5 and abs(y2) < 0.5 and xm > 1.0:
             right.append(c)
-        elif abs(x1-y1) < 0.5 and abs(x2-y2) < 0.5 and xm > 1.0 and ym > 1.0:
+            continue
+        # Left boundary: on line through origin at angle theta_s
+        d1 = abs(x1 * sin_s - y1 * cos_s)
+        d2 = abs(x2 * sin_s - y2 * cos_s)
+        dot = xm * cos_s + ym * sin_s
+        if d1 < 0.5 and d2 < 0.5 and dot > 1.0:
             left.append(c)
     return right, left
 
@@ -431,8 +445,8 @@ def build_mesh(
     all_stator_curves = iron_curves | slot_curves | gap_s_curves
     all_rotor_curves  = (iron_r_curves | gap_r_curves | mag_curves
                          | pkt_curves | shaft_curves)
-    st_right, st_left = _classify_sector_bounds(model, all_stator_curves, excl)
-    ro_right, ro_left = _classify_sector_bounds(model, all_rotor_curves, excl)
+    st_right, st_left = _classify_sector_bounds(model, all_stator_curves, excl, p.θs)
+    ro_right, ro_left = _classify_sector_bounds(model, all_rotor_curves, excl, p.θs)
 
     pg(1, domain_tags, "Domain")
     pg(1, sb_stator,   "SB_Stator")
