@@ -205,9 +205,16 @@ def gen_sif(
         Mangle_A_el = cmath.phase(phasor)            # [rad elec]
     Mangle_A = math.degrees(Mangle_A_el) / p.PP      # [deg mech]
     # d-axis position relative to the phase-A axis [deg mech]. Body-force
-    # formula treats this as the rotor d-axis at t=0 in the phase-A frame,
-    # so the standard Park-transform "γ measured from q-axis" convention
-    # gives γ=0 → q-axis aligned current.
+    # formula treats this as the rotor d-axis at t=0 in the phase-A frame.
+    # Note (2026-05-05): with this expression γ-sweeps put MTPA at
+    # γ ≈ −62° instead of the conventional −20° to −45° for IPM. The PM
+    # torque component from a Fourier fit peaks at γ ≈ −41°, suggesting a
+    # residual ~41° elec offset between this formula's "γ=0" and the true
+    # q-axis. Tried `Mangle + Mangle_A` (sum form) and got T_mean ≈ 0 at
+    # γ=0, which is worse — that puts γ=0 ~60° past d-axis. The current
+    # difference form is closest; empirical Mangle_dq ≈ 0 would move MTPA
+    # to γ=0 but doesn't have a clean derivation from the slot pattern.
+    # Filed as TODO.
     Mangle_dq = Mangle - Mangle_A
 
     # ── Body force assignment ───────────────────────────────────────────────
