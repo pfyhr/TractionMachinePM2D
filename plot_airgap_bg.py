@@ -110,7 +110,14 @@ def main() -> None:
     ap.add_argument("--qp", type=int, default=None,
                     help="If set, use motor_params_for_poles(qp). Otherwise default 48s/8p.")
     ap.add_argument("--out", default="results/png/airgap_Bg_compare.png")
+    ap.add_argument("--multi", action="store_true",
+                    help="Multi-Qp panel using cached multi-pole VTUs in "
+                         "examples/flux_multi_pole/.")
+    ap.add_argument("--multi-out", default="results/png/multi_pole_airgap_Bg.png")
     args = ap.parse_args()
+
+    if args.multi:
+        return _main_multi(args)
 
     p = motor_params_for_poles(args.qp) if args.qp else MotorParams()
     vtu = Path(args.vtu)
@@ -136,6 +143,57 @@ def main() -> None:
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=140, bbox_inches="tight")
     print(f"Saved: {args.out}")
+
+
+_MULTI_QP = [4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+
+def _main_multi(args) -> None:
+    """Build a 2x5-panel multi-Qp airgap Bg comparison from cached VTUs."""
+    base = Path("examples/flux_multi_pole")
+    if not base.exists():
+        raise FileNotFoundError(
+            f"Cache directory {base} not found — run plot_flux_multi_pole.py first.")
+
+    print(f"Multi-Qp airgap Bg comparison ({len(_MULTI_QP)} pole counts)")
+    panels = []
+    for Qp in _MULTI_QP:
+        res_dir = base / f"qp{Qp:02d}_results"
+        vtus = sorted(res_dir.glob(f"step-qp{Qp:02d}_t*.vtu"))
+        if not vtus:
+            print(f"  Qp={Qp:2d}  no VTU found in {res_dir}, skip")
+            continue
+        p = motor_params_for_poles(Qp)
+        th_full, Br_full, summary = airgap_bg_fft(vtus[0], p)
+        Bg_anal  = p.B_r / (1 + p.mu_r * p.g / p.h_m)
+        Bg1_anal = (4 / math.pi) * Bg_anal * math.sin(p.mag_frac * math.pi / 2)
+        ratio = summary["Bg1_FEM"] / Bg1_anal * 100
+        print(f"  Qp={Qp:2d}  Bg1_FEM={summary['Bg1_FEM']:.3f}  "
+              f"Bg1_anal={Bg1_anal:.3f}  ({ratio:.0f}%)")
+        panels.append((Qp, p, th_full, Br_full, summary, Bg_anal, Bg1_anal))
+
+    nrows, ncols = 2, 5
+    fig, axes = plt.subplots(nrows, ncols, figsize=(20, 7),
+                             sharex=True, sharey=True)
+    axes = axes.flatten()
+    for i, (Qp, p, th_full, Br_full, summary, Bg_anal, Bg1_anal) in enumerate(panels):
+        title = (f"Qp={Qp}  Qs={p.Qs}\n"
+                 f"Bg1_FEM={summary['Bg1_FEM']:.2f} T  "
+                 f"({summary['Bg1_FEM']/Bg1_anal*100:.0f}% of analytical)")
+        make_panel(axes[i], p, th_full, Br_full, summary, title)
+        axes[i].set_xlim(0, 360)
+
+    for j in range(len(panels), nrows * ncols):
+        axes[j].axis("off")
+
+    fig.suptitle("No-load airgap flux density — Qp = 4 … 20  "
+                 "(FEM solid, analytical rectangular dashed, fundamental dotted)",
+                 fontsize=12, y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    out = Path(args.multi_out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130, bbox_inches="tight")
+    print(f"Saved: {out}")
 
 
 if __name__ == "__main__":
