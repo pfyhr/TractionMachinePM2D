@@ -18,6 +18,7 @@ case_sweep/
 case_nb.sif
 case_sweep.sif
 case_bemf.sif
+case_eddy_lam.sif
 
 # Local examples / scratch outputs (not for publishing)
 examples/
