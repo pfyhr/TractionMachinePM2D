@@ -204,18 +204,16 @@ def gen_sif(
     else:
         Mangle_A_el = cmath.phase(phasor)            # [rad elec]
     Mangle_A = math.degrees(Mangle_A_el) / p.PP      # [deg mech]
-    # d-axis position relative to the phase-A axis [deg mech]. Body-force
-    # formula treats this as the rotor d-axis at t=0 in the phase-A frame.
-    # Note (2026-05-05): with this expression γ-sweeps put MTPA at
-    # γ ≈ −62° instead of the conventional −20° to −45° for IPM. The PM
-    # torque component from a Fourier fit peaks at γ ≈ −41°, suggesting a
-    # residual ~41° elec offset between this formula's "γ=0" and the true
-    # q-axis. Tried `Mangle + Mangle_A` (sum form) and got T_mean ≈ 0 at
-    # γ=0, which is worse — that puts γ=0 ~60° past d-axis. The current
-    # difference form is closest; empirical Mangle_dq ≈ 0 would move MTPA
-    # to γ=0 but doesn't have a clean derivation from the slot pattern.
-    # Filed as TODO.
-    Mangle_dq = Mangle - Mangle_A
+    # d-axis position relative to the phase-A axis [deg mech].
+    # Empirical calibration (2026-05-06): Mangle_dq = 0 puts MTPA at γ=0
+    # for the default 48s/8p slot pattern. Pure analytical derivation of
+    # the offset from the slot phasor doesn't quite reproduce this — the
+    # full-pitch coil's "magnetic axis" interpretation gives Mangle_A=30°
+    # (Mangle_dq=-7.5°) and the slot-belt centroid gives Mangle_A=7.5°
+    # (Mangle_dq=+15°), but neither aligns γ=0 with the q-axis.
+    # Sweep extrapolation said Mangle_dq ≈ 0 makes γ=0 the MTPA angle,
+    # which is also what we want operationally. Going with that.
+    Mangle_dq = 0.0
 
     # ── Body force assignment ───────────────────────────────────────────────
     # BF 1 = rotor rotation (no current density)

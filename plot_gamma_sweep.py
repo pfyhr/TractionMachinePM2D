@@ -50,10 +50,11 @@ def main() -> None:
         raise FileNotFoundError(f"{SWEEP_DIR} not found — "
                                 "run example.ipynb cell 25 first.")
 
-    # Recover (γ, T_mean) pairs from the sweep
+    # Recover (γ, T_mean) pairs from the sweep — must match the
+    # `gammas = np.linspace(...)` line in example.ipynb's sweep cell.
     runs = []
     n_per_sweep = 10
-    gammas = np.linspace(-90, 0, n_per_sweep)
+    gammas = np.linspace(-45, 45, n_per_sweep)
     for idx, gamma in enumerate(gammas):
         sf = SWEEP_DIR / f"g{idx}" / "scalars.dat"
         if not sf.exists():
